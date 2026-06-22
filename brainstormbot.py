@@ -20,8 +20,8 @@ def load_config():
         # Create template config file
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             f.write("# Configuration file\n")
-            f.write("TOKEN=your_bot_token_here\n")
-            f.write("TEACHER_ID=your_teacher_id_here\n")
+            f.write("TOKEN=\n")
+            f.write("TEACHER_ID=\n")
             f.write("BREAK_TIME=20\n")
             f.write("LESSON_DURATION=60\n")
         print(f"⚠️  Created template config file: {CONFIG_FILE}")
@@ -38,13 +38,17 @@ def load_config():
                     key, value = line.split('=', 1)
                     config[key.strip()] = value.strip()
 
-    # Validate required parameters
-    required = ['TOKEN', 'TEACHER_ID', 'BREAK_TIME', 'LESSON_DURATION']
-    missing = [param for param in required if param not in config]
+    # Validate required parameters - allow empty TEACHER_ID for initial setup
+    required = ['TOKEN']
+    missing = [param for param in required if param not in config or not config.get(param)]
 
     if missing:
         print(f"❌ Missing required parameters in {CONFIG_FILE}: {', '.join(missing)}")
         return None
+
+    # Check if TEACHER_ID is set (can be blank initially)
+    if 'TEACHER_ID' not in config:
+        config['TEACHER_ID'] = ''
 
     return config
 
@@ -55,9 +59,9 @@ if config is None:
 
 # Configuration from file
 TOKEN = config['TOKEN']
-TEACHER_ID = config['TEACHER_ID']
-BREAK_TIME = int(config['BREAK_TIME'])  # Break time in minutes
-LESSON_DURATION = int(config['LESSON_DURATION'])  # Lesson duration in minutes
+TEACHER_ID = config.get('TEACHER_ID', '')
+BREAK_TIME = int(config.get('BREAK_TIME', '20'))  # Break time in minutes
+LESSON_DURATION = int(config.get('LESSON_DURATION', '60'))  # Lesson duration in minutes
 
 DATA_FILE = "lessons.json"
 TIMEZONE_TEACHER = "Asia/Yekaterinburg"  # Екатеринбург (still hardcoded as requested)
@@ -306,7 +310,8 @@ def get_available_slots_for_user(user_id):
 
 # Admin panel functions
 def is_teacher(user_id):
-    return str(user_id) == TEACHER_ID
+    """Check if user is the teacher - only works if TEACHER_ID is set"""
+    return TEACHER_ID and str(user_id) == TEACHER_ID
 
 def admin_panel(message):
     if not is_teacher(message.from_user.id):
@@ -348,7 +353,25 @@ def start_handler(message):
         }
         save_data(data)
 
-    if is_teacher(message.from_user.id):
+    # Check if teacher has set up their ID
+    if not TEACHER_ID:
+        # Show setup instructions for everyone
+        markup = ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(KeyboardButton("📚 Записаться на урок"))
+        markup.add(KeyboardButton("📅 Мои записи"))
+        markup.add(KeyboardButton("❌ Отменить запись"))
+        markup.add(KeyboardButton("ℹ️ Осталось уроков"))
+        markup.add(KeyboardButton("🕐 Установить часовой пояс"))
+        markup.add(KeyboardButton("📞 Указать телефон"))
+
+        bot.send_message(
+            message.chat.id,
+            f"👋 **Привет, {user_name}!**\n\nЯ бот для записи на уроки. Вы можете:\n"
+            "• Записаться на урок\n• Посмотреть/отменить записи\n• Проверить остаток уроков\n• Установить часовой пояс\n• Если застряли в боте, просто пропишите /start снова",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+    elif is_teacher(message.from_user.id):
         markup = ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add(KeyboardButton("📝 Установить расписание"))
         markup.add(KeyboardButton("👨‍🏫 Админ-панель"))
@@ -378,6 +401,7 @@ def start_handler(message):
             parse_mode="Markdown"
         )
 
+
 @bot.message_handler(func=lambda message: message.text == "❌ Отменить запись" and not is_teacher(message.from_user.id))
 def cancel_booking_student(message):
     """Show student's bookings for cancellation"""
@@ -398,7 +422,7 @@ def cancel_booking_student(message):
                 upcoming_lessons.append(lesson)
 
     if not upcoming_lessons:
-        bot.send_message(message.chat.id, "📭 У вас нет запланированных уроков для отмены.")
+        bot.send_message(message.chat.id, "📭 У вас нет запланированных уроков.")
         return
 
     markup = InlineKeyboardMarkup()
@@ -406,14 +430,25 @@ def cancel_booking_student(message):
         dt = datetime.fromisoformat(lesson['datetime'])
         date_str = dt.strftime("%d.%m-%a-%H:%M").replace("Mon", "ПН").replace("Tue", "ВТ").replace("Wed", "СР")\
                    .replace("Thu", "ЧТ").replace("Fri", "ПТ").replace("Sat", "СБ").replace("Sun", "ВС")
-        markup.add(InlineKeyboardButton(
-            f"{i+1}. {date_str}",
-            callback_data=f"cancel_student_{lesson['id']}"
-        ))
+        # Add two buttons per lesson: cancel and reschedule
+        markup.add(
+            InlineKeyboardButton(
+                f"❌ {i+1}. {date_str}",
+                callback_data=f"cancel_student_{lesson['id']}"
+            ),
+            InlineKeyboardButton(
+                f"🔄 Перенести {i+1}",
+                callback_data=f"reschedule_student_{lesson['id']}"
+            )
+        )
 
     bot.send_message(
         message.chat.id,
-        "❌ **Выберите запись для отмены:**\n\n*Отмена возможна минимум за 2 часа до урока*",
+        "❌ **Управление записями:**\n\n"
+        "*Выберите действие для урока:*\n"
+        "❌ - Отменить урок (возврат в баланс)\n"
+        "🔄 - Перенести на другое время\n\n"
+        "*Отмена возможна минимум за 2 часа до урока*",
         reply_markup=markup,
         parse_mode="Markdown"
     )
@@ -509,16 +544,197 @@ def process_cancel_student(call):
     )
 
     # Notify teacher
-    bot.send_message(
-        TEACHER_ID,
-        f"❌ **Отмена урока студентом**\n\n"
-        f"👨‍🎓 Студент: {lesson['student_name']}\n"
-        f"📅 Дата: {date_str}\n"
-        f"🔄 Урок возвращен студенту",
-        parse_mode="Markdown"
-    )
+    if TEACHER_ID:
+        bot.send_message(
+            TEACHER_ID,
+            f"❌ **Отмена урока студентом**\n\n"
+            f"👨‍🎓 Студент: {lesson['student_name']}\n"
+            f"📅 Дата: {date_str}\n"
+            f"🔄 Урок возвращен студенту",
+            parse_mode="Markdown"
+        )
 
     bot.answer_callback_query(call.id, "✅ Запись отменена")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reschedule_student_'))
+def process_reschedule_student(call):
+    """Process student rescheduling a lesson"""
+    user_id = str(call.from_user.id)
+    lesson_id = call.data.replace('reschedule_student_', '')
+
+    # Reload data to ensure we have the latest state
+    global data
+    data = load_data()
+
+    # Find the lesson
+    lesson = next((l for l in data['lessons'] if l['id'] == lesson_id), None)
+
+    if not lesson or lesson['student_id'] != user_id:
+        bot.answer_callback_query(call.id, "❌ Запись не найдена")
+        return
+
+    # Check if lesson is already cancelled
+    if lesson.get('status') in ['cancelled', 'cancelled_by_teacher']:
+        bot.answer_callback_query(call.id, "❌ Этот урок уже отменен")
+        return
+
+    # Check if reschedule is allowed (at least 2 hours before)
+    lesson_dt = datetime.fromisoformat(lesson['datetime'])
+    time_diff = lesson_dt - datetime.now()
+
+    if time_diff.total_seconds() < 7200:  # 2 hours in seconds
+        bot.answer_callback_query(call.id, "❌ Перенос возможен только за 2+ часа до урока")
+        return
+
+    # Check if timetable is set for current week
+    if not is_timetable_for_current_week():
+        bot.answer_callback_query(call.id, "❌ Расписание на эту неделю еще не установлено")
+        return
+
+    # Get available slots for rescheduling
+    available_slots = get_available_slots_for_user(user_id)
+
+    # Filter out the current lesson time and conflicting times
+    filtered_slots = []
+    for slot in available_slots:
+        # Skip the current lesson time
+        if slot['datetime'] == lesson_dt:
+            continue
+        # Check if slot doesn't conflict with other lessons
+        if is_slot_available(slot['datetime']):
+            # Check user's existing lessons for conflicts
+            conflict = False
+            for other_lesson_id in data['users'][user_id]['schedule']:
+                if other_lesson_id == lesson_id:
+                    continue
+                other_lesson = next((l for l in data['lessons'] if l['id'] == other_lesson_id), None)
+                if other_lesson and other_lesson.get('status') not in ['cancelled', 'cancelled_by_teacher']:
+                    other_start = datetime.fromisoformat(other_lesson['datetime'])
+                    other_end = other_start + timedelta(minutes=LESSON_DURATION)
+                    proposed_end = slot['datetime'] + timedelta(minutes=LESSON_DURATION)
+                    if not (proposed_end <= other_start or slot['datetime'] >= other_end):
+                        conflict = True
+                        break
+            if not conflict:
+                filtered_slots.append(slot)
+
+    if not filtered_slots:
+        bot.answer_callback_query(call.id, "❌ Нет доступных слотов для переноса")
+        return
+
+    # Store lesson ID in user data for rescheduling
+    if user_id not in data['users']:
+        data['users'][user_id] = {}
+    data['users'][user_id]['rescheduling_lesson_id'] = lesson_id
+    save_data(data)
+
+    # Create keyboard with available slots
+    markup = InlineKeyboardMarkup()
+    for i, slot in enumerate(filtered_slots[:25]):
+        button_text = f"{slot['date_str']} - {slot['student_time']} ({slot['timezone']})"
+        callback_data = f"reschedule_confirm_{i}_{slot['day']}_{slot['datetime'].strftime('%Y%m%d_%H%M')}_{lesson_id}"
+        markup.add(InlineKeyboardButton(button_text, callback_data=callback_data))
+
+    bot.edit_message_text(
+        f"🔄 **Перенос урока**\\n\\n"
+        f"Текущая запись: {lesson_dt.strftime('%d.%m-%a-%H:%M').replace('Mon', 'ПН').replace('Tue', 'ВТ').replace('Wed', 'СР').replace('Thu', 'ЧТ').replace('Fri', 'ПТ').replace('Sat', 'СБ').replace('Sun', 'ВС')}\\n\\n"
+        f"Выберите новое время для урока:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+    bot.answer_callback_query(call.id, "Выберите новое время")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reschedule_confirm_'))
+def confirm_reschedule(call):
+    """Confirm the reschedule action"""
+    user_id = str(call.from_user.id)
+    parts = call.data.split('_')
+    
+    if len(parts) < 6:
+        bot.answer_callback_query(call.id, "❌ Ошибка в данных")
+        return
+
+    lesson_id = parts[5]
+    datetime_str = f"{parts[4]}_{parts[5]}" if len(parts) > 5 else f"{parts[3]}_{parts[4]}"
+    
+    # Re-parse to get correct indices
+    # Format: reschedule_confirm_IDX_DAY_YYYYMMDD_HHMM_LESSONID
+    if len(parts) == 6:
+        # reschedule_confirm_IDX_DAY_YYYYMMDD_HHMM (lesson_id at end was wrong)
+        # Actually: reschedule_confirm_IDX_DAY_YYYYMMDD_HHMM_LESSONID
+        datetime_str = f"{parts[3]}_{parts[4]}"
+        lesson_id = parts[5] if len(parts) > 5 else None
+    
+    # Better parsing
+    data_parts = call.data.replace('reschedule_confirm_', '').split('_')
+    if len(data_parts) < 4:
+        bot.answer_callback_query(call.id, "❌ Ошибка в данных")
+        return
+    
+    day = data_parts[1]
+    datetime_str = f"{data_parts[2]}_{data_parts[3]}"
+    original_lesson_id = data_parts[4] if len(data_parts) > 4 else None
+
+    try:
+        proposed_datetime = datetime.strptime(datetime_str, "%Y%m%d_%H%M")
+        
+        # Verify the lesson still exists
+        lesson = next((l for l in data['lessons'] if l['id'] == original_lesson_id), None)
+        if not lesson or lesson['student_id'] != user_id:
+            bot.answer_callback_query(call.id, "❌ Запись не найдена")
+            return
+        
+        # Check if slot is still available
+        if not is_slot_available(proposed_datetime):
+            bot.answer_callback_query(call.id, "❌ Этот слот уже занят")
+            return
+        
+        # Update the lesson datetime
+        old_datetime = lesson['datetime']
+        lesson['datetime'] = proposed_datetime.isoformat()
+        
+        # Save data
+        save_data(data)
+        
+        # Format dates
+        teacher_tz = pytz.timezone(TIMEZONE_TEACHER)
+        localized_new = teacher_tz.localize(proposed_datetime)
+        weekday_map = {0: "ПН", 1: "ВТ", 2: "СР", 3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"}
+        weekday = weekday_map[localized_new.weekday()]
+        new_date_str = localized_new.strftime(f"%d.%m-{weekday}-%H:%M")
+        end_time = localized_new + timedelta(minutes=LESSON_DURATION)
+        
+        bot.edit_message_text(
+            f"✅ **Урок перенесен!**\\n\\n"
+            f"📅 Новая дата: {new_date_str}\\n"
+            f"⏰ Время: {localized_new.strftime('%H:%M')}-{end_time.strftime('%H:%M')} (время учителя)\\n"
+            f"👨‍🎓 Студент: {lesson['student_name']}",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown"
+        )
+        
+        # Notify teacher
+        if TEACHER_ID:
+            bot.send_message(
+                TEACHER_ID,
+                f"🔄 **Студент перенес урок**\\n\\n"
+                f"👨‍🎓 Студент: {lesson['student_name']}\\n"
+                f"📅 Новая дата: {new_date_str}\\n"
+                f"⏰ Время: {localized_new.strftime('%H:%M')}-{end_time.strftime('%H:%M')}",
+                parse_mode="Markdown"
+            )
+        
+        # Schedule new reminder
+        schedule_reminder(lesson['id'], proposed_datetime)
+        
+        bot.answer_callback_query(call.id, "✅ Урок успешно перенесен!")
+        
+    except Exception as e:
+        print(f"Error in reschedule: {e}")
+        bot.answer_callback_query(call.id, "❌ Произошла ошибка при переносе")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delete_teacher_'))
 def process_delete_teacher(call):
@@ -786,7 +1002,7 @@ def process_timetable(message):
             f"✅ Расписание установлено на текущую неделю (неделя {current_week})!\n"
             f"Доступно {len(data['teacher_timetable'])} временных окон.\n"
             f"Длительность урока: {LESSON_DURATION} минут\n"
-            f"Время перерыва между уроками: {BREAK_TIME} минут",
+            f"Время перерыва между уроками: {BREAK_TIME} минут\n\n📅 В воскресенье утром студентам будет отправлено уведомление с расписанием на неделю.",
             reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(
                 KeyboardButton("📝 Установить расписание"),
                 KeyboardButton("👨‍🏫 Админ-панель")
@@ -964,7 +1180,8 @@ def book_slot(call):
             f"⏳ Длительность: {LESSON_DURATION} минут\n"
             f"📞 Телефон: {user_data['phone'] or 'не указан'}"
         )
-        bot.send_message(TEACHER_ID, teacher_msg, parse_mode="Markdown")
+        if TEACHER_ID:
+            bot.send_message(TEACHER_ID, teacher_msg, parse_mode="Markdown")
 
         # Schedule reminder
         schedule_reminder(lesson_id, proposed_datetime)
@@ -1280,18 +1497,115 @@ def send_reminder(lesson_id, reminder_time):
         )
 
         # Send reminder to teacher
-        bot.send_message(
-            TEACHER_ID,
-            f"🔔 **Напоминание об уроке!**\n\n"
-            f"Урок с {data['users'][lesson['student_id']]['name']} "
-            f"начнется через 15 минут!\n"
-            f"Длительность: {lesson.get('duration', LESSON_DURATION)} минут",
-            parse_mode="Markdown"
-        )
+        if TEACHER_ID:
+            bot.send_message(
+                TEACHER_ID,
+                f"🔔 **Напоминание об уроке!**\n\n"
+                f"Урок с {data['users'][lesson['student_id']]['name']} "
+                f"начнется через 15 минут!\n"
+                f"Длительность: {lesson.get('duration', LESSON_DURATION)} минут",
+                parse_mode="Markdown"
+            )
 
         # Mark as reminded
         lesson['status'] = 'reminded'
         save_data(data)
+
+# Sunday timetable notification function
+def send_weekly_timetable_to_students():
+    """Send weekly timetable to all students on Sunday"""
+    teacher_tz = pytz.timezone(TIMEZONE_TEACHER)
+    now = datetime.now(teacher_tz)
+
+    # Check if it's Sunday (weekday 6) and morning (9:00-12:00)
+    if now.weekday() == 6 and 9 <= now.hour <= 12:
+        # Check if timetable is set for current week
+        if not is_timetable_for_current_week():
+            return  # No timetable set yet
+        
+        # Generate timetable message
+        timetable_message = "📅 **Расписание на эту неделю:**\n\n"
+        
+        # Group slots by day
+        slots_by_day = {}
+        weekday_map = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
+        weekday_names = {
+            0: "Понедельник", 1: "Вторник", 2: "Среда", 
+            3: "Четверг", 4: "Пятница", 5: "Суббота", 6: "Воскресенье"
+        }
+        
+        for entry in data['teacher_timetable']:
+            if entry.get('has_date'):
+                date = entry.get('full_date')
+                if date is None:
+                    continue
+                day_idx = date.weekday()
+                day_name = weekday_names.get(day_idx, entry['day'])
+                date_str = date.strftime("%d.%m")
+            else:
+                day_idx = weekday_map.index(entry['day']) if entry['day'] in weekday_map else -1
+                if day_idx == -1:
+                    continue
+                day_name = weekday_names.get(day_idx, entry['day'])
+                date = get_next_weekday(entry['day'], 0)
+                date_str = date.strftime("%d.%m") if date else "N/A"
+            
+            if day_name not in slots_by_day:
+                slots_by_day[day_name] = []
+            
+            slots_by_day[day_name].append(f"{entry['start']}-{entry['end']}")
+        
+        # Build message
+        for day_name in ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]:
+            if day_name in slots_by_day:
+                times = ", ".join(slots_by_day[day_name])
+                timetable_message += f"**{day_name}**: {times}\n"
+        
+        if len(slots_by_day) == 0:
+            timetable_message += "Расписание еще не установлено.\n"
+        else:
+            timetable_message += "\n⏰ Время указано по Екатеринбургу.\n"
+            timetable_message += "Используйте кнопку '🕐 Установить часовой пояс' для конвертации времени.\n"
+            timetable_message += "\n📚 Записывайтесь на удобные слоты через бота!"
+        
+        # Send to all students
+        for user_id, user_data in list(data['users'].items()):
+            if user_id == TEACHER_ID:
+                continue
+
+            try:
+                bot.send_message(
+                    user_id,
+                    timetable_message,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                print(f"Failed to send weekly timetable to {user_id}: {e}")
+
+        # Send confirmation to teacher
+        if TEACHER_ID:
+            bot.send_message(
+                TEACHER_ID,
+                f"✅ Рассылка расписания на неделю выполнена!\n"
+                f"Отправлено {len(data['users']) - 1} студентам.",
+                parse_mode="Markdown"
+            )
+
+# Schedule the Sunday timetable notification
+def schedule_sunday_timetable():
+    """Schedule Sunday timetable check"""
+    while True:
+        try:
+            send_weekly_timetable_to_students()
+        except Exception as e:
+            print(f"Error in Sunday timetable notification: {e}")
+
+        # Check once per hour
+        time.sleep(3600)
+
+# Start Sunday timetable thread
+sunday_thread = threading.Thread(target=schedule_sunday_timetable, daemon=True)
+sunday_thread.start()
 
 # Saturday evening reminder function
 def send_saturday_timetable_reminder():
@@ -1319,13 +1633,14 @@ def send_saturday_timetable_reminder():
                 print(f"Failed to send Saturday reminder to {user_id}: {e}")
 
         # Send to teacher
-        bot.send_message(
-            TEACHER_ID,
-            "👨‍🏫 **Напоминание об обновлении расписания!**\n\n"
-            "Сегодня суббота - время обновить расписание на следующую неделю!\n"
-            "Используйте кнопку '📝 Установить расписание' для создания расписания на следующую неделю.",
-            parse_mode="Markdown"
-        )
+        if TEACHER_ID:
+            bot.send_message(
+                TEACHER_ID,
+                "👨‍🏫 **Напоминание об обновлении расписания!**\n\n"
+                "Сегодня суббота - время обновить расписание на следующую неделю!\n"
+                "Используйте кнопку '📝 Установить расписание' для создания расписания на следующую неделю.",
+                parse_mode="Markdown"
+            )
 
 # Schedule the Saturday reminder
 def schedule_saturday_reminder():
