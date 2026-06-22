@@ -1062,33 +1062,46 @@ def show_available_slots(message):
         )
         return
 
-    markup = InlineKeyboardMarkup()
-    for i, slot in enumerate(available_slots[:25]):
-        # Format: "DATE-WEEKDAY-TIME (TIMEZONE)"
-        button_text = f"{slot['date_str']} - {slot['student_time']} ({slot['timezone']})"
-        callback_data = f"book_{i}_{slot['day']}_{slot['datetime'].strftime('%Y%m%d_%H%M')}"
-        markup.add(InlineKeyboardButton(button_text, callback_data=callback_data))
+    # Group slots by day
+    slots_by_day = {}
+    for slot in available_slots:
+        day_key = slot['date_str']  # e.g., "22.06-ПН"
+        if day_key not in slots_by_day:
+            slots_by_day[day_key] = []
+        slots_by_day[day_key].append(slot)
 
-    if len(available_slots) > 25:
-        bot.send_message(
-            message.chat.id,
-            f"📅 **Доступные слоты (первые 25 из {len(available_slots)}):**\n\n"
-            "*Формат: ДАТА-ДЕНЬ-ВРЕМЯ (ваш часовой пояс)*\n"
-            f"Осталось уроков: {data['users'][user_id]['remaining']}\n"
-            f"Длительность урока: {LESSON_DURATION} минут",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-    else:
-        bot.send_message(
-            message.chat.id,
-            f"📅 **Доступные слоты для записи:**\n\n"
-            "*Формат: ДАТА-ДЕНЬ-ВРЕМЯ (ваш часовой пояс)*\n"
-            f"Осталось уроков: {data['users'][user_id]['remaining']}\n"
-            f"Длительность урока: {LESSON_DURATION} минут",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+    # Create keyboard with slots grouped by day
+    markup = InlineKeyboardMarkup()
+    
+    # Sort days chronologically
+    sorted_days = sorted(slots_by_day.keys(), key=lambda x: datetime.strptime(x.split('-')[0], "%d.%m"))
+    
+    for day_key in sorted_days:
+        day_slots = slots_by_day[day_key]
+        
+        # Add a non-clickable label for the day (using a disabled button trick)
+        # Since Telegram doesn't support disabled buttons, we'll use a text message approach
+        # Instead, we'll group all slots for this day together
+        
+        for slot in day_slots:
+            # Format: "DATE-WEEKDAY-TIME (TIMEZONE)"
+            button_text = f"{slot['student_time']} ({slot['timezone']})"
+            callback_data = f"book_{slot['day']}_{slot['datetime'].strftime('%Y%m%d_%H%M')}_{slot['date_str']}"
+            markup.add(InlineKeyboardButton(button_text, callback_data=callback_data))
+        
+        # Add a separator line (empty row) between days for visual clarity
+        # We can't add empty rows, so we'll just continue to next day
+
+    bot.send_message(
+        message.chat.id,
+        f"📅 **Доступные слоты для записи:**\n\n"
+        f"*Время указано в вашем часовом поясе*\n"
+        f"Осталось уроков: {data['users'][user_id]['remaining']}\n"
+        f"Длительность урока: {LESSON_DURATION} минут\n\n"
+        f"🗓 *Расписание по дням:*",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('book_'))
 def book_slot(call):
@@ -1100,13 +1113,14 @@ def book_slot(call):
         return
 
     parts = call.data.split('_')
-    if len(parts) < 4:
+    # New format: book_DAY_YYYYMMDD_HHMM_DATESTR (e.g., book_ПН_20250622_1800_22.06-ПН)
+    if len(parts) < 5:
         bot.answer_callback_query(call.id, "❌ Ошибка в данных")
         return
 
-    slot_idx = int(parts[1])
-    day = parts[2]
-    datetime_str = f"{parts[3]}_{parts[4]}"
+    day = parts[1]
+    datetime_str = f"{parts[2]}_{parts[3]}"
+    date_str = parts[4]  # e.g., "22.06-ПН"
 
     try:
         proposed_datetime = datetime.strptime(datetime_str, "%Y%m%d_%H%M")
