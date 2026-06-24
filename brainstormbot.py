@@ -66,6 +66,7 @@ LESSON_DURATION = int(config.get('LESSON_DURATION', '60'))  # Lesson duration in
 DATA_FILE = "lessons.json"
 TIMEZONE_TEACHER = "Asia/Yekaterinburg"  # Екатеринбург (still hardcoded as requested)
 TIMEZONE_STUDENT_DEFAULT = "Europe/Moscow"  # MSK as default
+LESSON_LINK = "https://7kbsf14w.ktalk.ru/qns6bld7jqwq"  # Ссылка на занятие
 
 # Initialize bot
 bot = telebot.TeleBot(TOKEN)
@@ -82,7 +83,8 @@ def load_data():
         "settings": {"teacher_timezone": TIMEZONE_TEACHER},
         "advertisements": [],  # Store sent advertisements
         "last_timetable_week": None,  # Track which week the timetable is for
-        "temp_state": {}  # Temporary state for multi-step booking
+        "temp_state": {},  # Temporary state for multi-step booking
+        "teacher_notes": {}  # Teacher's private notes for each student
     }
 
 def save_data(data):
@@ -326,7 +328,11 @@ def admin_panel(message):
         KeyboardButton("💰 Пополнить уроки"),
         KeyboardButton("📅 Текущее расписание"),
         KeyboardButton("❌ Удалить запись"),
-        KeyboardButton("📢 Отправить рекламу")
+        KeyboardButton("📢 Отправить рекламу"),
+        KeyboardButton("📅 Календарь на неделю"),
+        KeyboardButton("✏️ Заметки"),
+        KeyboardButton("➕ Добавить занятие"),
+        KeyboardButton("✏️ Изменить имя студента")
     )
 
     bot.send_message(
@@ -345,7 +351,9 @@ def start_handler(message):
         user_name += " " + message.from_user.last_name
 
     # Initialize user if not exists
+    is_new_user = False
     if user_id not in data['users']:
+        is_new_user = True
         data['users'][user_id] = {
             "name": user_name,
             "remaining": 0,
@@ -402,6 +410,28 @@ def start_handler(message):
             reply_markup=markup,
             parse_mode="Markdown"
         )
+
+    # If new student, give them 1 trial lesson and notify
+    if is_new_user and not is_teacher(message.from_user.id):
+        data['users'][user_id]['remaining'] = 1
+        save_data(data)
+        bot.send_message(
+            message.chat.id,
+            f"🎁 **Пробный урок!**\n\n"
+            f"Вам добавлен 1 пробный урок.\n"
+            f"Теперь у вас есть {data['users'][user_id]['remaining']} урок для записи.",
+            parse_mode="Markdown"
+        )
+        # Notify teacher about new student
+        if TEACHER_ID:
+            bot.send_message(
+                TEACHER_ID,
+                f"🆕 **Новый студент!**\n\n"
+                f"Имя: {user_name}\n"
+                f"ID: {user_id}\n"
+                f"Добавлен 1 пробный урок.",
+                parse_mode="Markdown"
+            )
 
 
 @bot.message_handler(func=lambda message: message.text == "❌ Отменить запись" and not is_teacher(message.from_user.id))
@@ -552,7 +582,8 @@ def process_cancel_student(call):
             f"❌ **Отмена урока студентом**\n\n"
             f"👨‍🎓 Студент: {lesson['student_name']}\n"
             f"📅 Дата: {date_str}\n"
-            f"🔄 Урок возвращен студенту",
+            f"🔄 Урок возвращен студенту\n"
+            f"🔗 Ссылка на занятие: {LESSON_LINK}",
             parse_mode="Markdown"
         )
 
@@ -795,11 +826,23 @@ def process_delete_teacher(call):
             f"❌ **Урок отменен учителем**\n\n"
             f"📅 Дата: {date_str}\n"
             f"🔄 Урок возвращен в ваш баланс\n"
-            f"📊 Осталось уроков: {data['users'][student_id]['remaining']}",
+            f"📊 Осталось уроков: {data['users'][student_id]['remaining']}\n"
+            f"🔗 Ссылка на занятие: {LESSON_LINK}",
             parse_mode="Markdown"
         )
     except:
         pass  # Student may have blocked the bot
+
+    # Notify teacher in chat about cancellation
+    bot.send_message(
+        TEACHER_ID,
+        f"❌ **Урок отменен преподавателем**\n\n"
+        f"👨‍🎓 Студент: {lesson['student_name']}\n"
+        f"📅 Дата: {date_str}\n"
+        f"🔄 Урок возвращен студенту\n"
+        f"🔗 Ссылка на занятие: {LESSON_LINK}",
+        parse_mode="Markdown"
+    )
 
     bot.answer_callback_query(call.id, "✅ Запись удалена")
 
@@ -972,8 +1015,8 @@ def handle_advertisement_actions(call):
 
 @bot.message_handler(func=lambda message: message.text == "📝 Установить расписание" and is_teacher(message.from_user.id))
 def request_timetable(message):
-    # Clear previous timetable for the week
-    data['teacher_timetable'] = []
+    # Don't clear previous timetable - allow editing
+    # data['teacher_timetable'] = []
 
     msg = bot.send_message(
         message.chat.id,
@@ -985,12 +1028,24 @@ def request_timetable(message):
         f"`СР - 19:00-21:00`\n\n"
         f"Или используйте формат с датами:\n"
         f"`15.12-ПН-18:00-20:00`\n\n"
-        f"Можно указать несколько строк. Отправьте 'готово' когда закончите.",
+        f"Можно указать несколько строк. Отправьте 'готово' когда закончите.\n"
+        f"Или отправьте **'оставить'** чтобы сохранить текущее расписание без изменений.",
         parse_mode="Markdown"
     )
     bot.register_next_step_handler(msg, process_timetable)
 
 def process_timetable(message):
+    if message.text.lower() == 'оставить':
+        bot.send_message(
+            message.chat.id,
+            "✅ **Расписание сохранено без изменений.**\n\n"
+            f"Текущее расписание:\n" + 
+            "\n".join([f"• {e['original']}" for e in data['teacher_timetable']]) if data['teacher_timetable'] else "❌ Расписание пустое",
+            parse_mode="Markdown"
+        )
+        admin_panel(message)
+        return
+
     if message.text.lower() == 'готово':
         if not data['teacher_timetable']:
             bot.send_message(message.chat.id, "❌ Расписание пустое. Отправьте хотя бы один элемент.")
@@ -1388,8 +1443,8 @@ def refresh_slots(call):
     )
 
 def schedule_reminder(lesson_id, lesson_datetime):
-    """Schedule reminder 30 minutes before lesson"""
-    reminder_time = lesson_datetime - timedelta(minutes=30)
+    """Schedule reminder 15 minutes before lesson"""
+    reminder_time = lesson_datetime - timedelta(minutes=15)
 
     def send_reminder():
         # Reload data to ensure we have latest state
@@ -1408,14 +1463,45 @@ def schedule_reminder(lesson_id, lesson_datetime):
                 lesson['student_id'],
                 f"🔔 **Напоминание об уроке!**\n\n"
                 f"📅 Дата: {date_str}\n"
-                f"👨‍🎓 Студент: {lesson['student_name']}",
+                f"👨‍🎓 Студент: {lesson['student_name']}\n"
+                f"🔗 Ссылка на занятие: {LESSON_LINK}",
                 parse_mode="Markdown"
             )
-        except:
+        except Exception as e:
+            print(f"Error sending reminder to student: {e}")
             pass  # Student may have blocked the bot
 
-    # Schedule the reminder
-    schedule.every().day.at(reminder_time.strftime("%H:%M")).do(send_reminder).tag(f"reminder_{lesson_id}")
+        # Send reminder to teacher
+        try:
+            if TEACHER_ID:
+                bot.send_message(
+                    TEACHER_ID,
+                    f"🔔 **Напоминание: урок через 15 минут!**\n\n"
+                    f"📅 Дата: {date_str}\n"
+                    f"👨‍🎓 Студент: {lesson['student_name']}\n"
+                    f"🔗 Ссылка на занятие: {LESSON_LINK}",
+                    parse_mode="Markdown"
+                )
+        except Exception as e:
+            print(f"Error sending reminder to teacher: {e}")
+            pass
+
+    # Schedule the reminder using a one-time scheduler approach
+    def check_and_send():
+        now = datetime.now()
+        if now >= reminder_time:
+            send_reminder()
+            return False  # Stop repeating
+        return True  # Keep checking
+
+    # Use a thread to wait until the reminder time
+    def wait_and_send():
+        while datetime.now() < reminder_time:
+            time.sleep(30)  # Check every 30 seconds
+        send_reminder()
+
+    reminder_thread = threading.Thread(target=wait_and_send, daemon=True)
+    reminder_thread.start()
 
 def run_scheduler():
     """Run the scheduler in a separate thread"""
@@ -1579,6 +1665,310 @@ def process_phone(message, user_id):
 @bot.message_handler(func=lambda message: message.text == "👨‍🏫 Админ-панель" and is_teacher(message.from_user.id))
 def admin_panel_handler(message):
     admin_panel(message)
+
+# Calendar for the week
+@bot.message_handler(func=lambda message: message.text == "📅 Календарь на неделю" and is_teacher(message.from_user.id))
+def show_weekly_calendar(message):
+    """Show weekly calendar with all lessons"""
+    now = datetime.now(pytz.timezone(TIMEZONE_TEACHER))
+    # Get start of current week (Monday)
+    start_of_week = now - timedelta(days=now.weekday())
+    start_of_week = start_of_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    weekday_names = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
+    calendar_text = "📅 **Календарь на эту неделю**\n\n"
+    
+    for day_offset in range(7):
+        current_day = start_of_week + timedelta(days=day_offset)
+        day_name = weekday_names[day_offset]
+        date_str = current_day.strftime("%d.%m")
+        
+        calendar_text += f"**{day_name} ({date_str}):**\n"
+        
+        # Find all lessons for this day
+        day_lessons = []
+        for lesson in data['lessons']:
+            if lesson.get('status') in ['cancelled', 'cancelled_by_teacher']:
+                continue
+            lesson_dt = datetime.fromisoformat(lesson['datetime'])
+            lesson_date = lesson_dt.date()
+            if lesson_date == current_day.date():
+                day_lessons.append((lesson_dt, lesson))
+        
+        if day_lessons:
+            day_lessons.sort(key=lambda x: x[0])
+            for lesson_dt, lesson in day_lessons:
+                time_str = lesson_dt.strftime("%H:%M")
+                calendar_text += f"  • {time_str} - {lesson['student_name']}\n"
+        else:
+            calendar_text += "  • Нет занятий\n"
+        calendar_text += "\n"
+    
+    bot.send_message(message.chat.id, calendar_text, parse_mode="Markdown")
+
+# Teacher notes management
+@bot.message_handler(func=lambda message: message.text == "✏️ Заметки" and is_teacher(message.from_user.id))
+def manage_notes(message):
+    """Manage teacher's private notes for students"""
+    students = [user for uid, user in data['users'].items() if uid != TEACHER_ID]
+    
+    if not students:
+        bot.send_message(message.chat.id, "📭 Нет зарегистрированных студентов.")
+        return
+    
+    markup = InlineKeyboardMarkup()
+    for user in students:
+        user_id = [uid for uid, u in data['users'].items() if u == user][0]
+        has_note = user_id in data.get('teacher_notes', {}) and data['teacher_notes'][user_id]
+        note_indicator = "📝" if has_note else ""
+        markup.add(InlineKeyboardButton(
+            f"{note_indicator} {user['name']}",
+            callback_data=f"note_edit_{user_id}"
+        ))
+    
+    bot.send_message(
+        message.chat.id,
+        "✏️ **Заметки преподавателя**\n\nВыберите студента для просмотра/редактирования заметки:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('note_edit_'))
+def edit_note(call):
+    """Edit or view note for a student"""
+    user_id = call.data.replace('note_edit_', '')
+    student = data['users'].get(user_id)
+    
+    if not student:
+        bot.answer_callback_query(call.id, "❌ Студент не найден")
+        return
+    
+    current_note = data.get('teacher_notes', {}).get(user_id, "")
+    
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"✏️ **Заметка для {student['name']}**\n\n"
+        f"Текущая заметка:\n{current_note if current_note else '*(пусто)*'}\n\n"
+        f"Отправьте новый текст заметки или 'удалить' чтобы очистить.",
+        parse_mode="Markdown"
+    )
+    bot.register_next_step_handler(msg, lambda m: save_note(m, user_id, student['name']))
+    bot.answer_callback_query(call.id)
+
+def save_note(message, user_id, student_name):
+    """Save teacher's note for a student"""
+    if message.text.lower() == 'удалить':
+        if 'teacher_notes' not in data:
+            data['teacher_notes'] = {}
+        data['teacher_notes'][user_id] = ""
+        save_data(data)
+        bot.send_message(message.chat.id, f"✅ Заметка для {student_name} удалена.")
+        return
+    
+    if 'teacher_notes' not in data:
+        data['teacher_notes'] = {}
+    data['teacher_notes'][user_id] = message.text
+    save_data(data)
+    
+    bot.send_message(
+        message.chat.id,
+        f"✅ **Заметка сохранена!**\n\n"
+        f"Студент: {student_name}\n"
+        f"Заметка: {message.text}",
+        parse_mode="Markdown"
+    )
+
+# Add lesson for student (for students without Telegram)
+@bot.message_handler(func=lambda message: message.text == "➕ Добавить занятие" and is_teacher(message.from_user.id))
+def add_lesson_for_student(message):
+    """Add a lesson for a student manually"""
+    students = [user for uid, user in data['users'].items() if uid != TEACHER_ID]
+    
+    if not students:
+        bot.send_message(message.chat.id, "📭 Нет зарегистрированных студентов.")
+        return
+    
+    markup = InlineKeyboardMarkup()
+    for user in students:
+        user_id = [uid for uid, u in data['users'].items() if u == user][0]
+        markup.add(InlineKeyboardButton(
+            f"{user['name']} (осталось: {user.get('remaining', 0)})",
+            callback_data=f"add_lesson_select_{user_id}"
+        ))
+    
+    bot.send_message(
+        message.chat.id,
+        "➕ **Добавить занятие**\n\nВыберите студента:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('add_lesson_select_'))
+def select_student_for_lesson(call):
+    """Select student and ask for lesson datetime"""
+    user_id = call.data.replace('add_lesson_select_', '')
+    student = data['users'].get(user_id)
+    
+    if not student:
+        bot.answer_callback_query(call.id, "❌ Студент не найден")
+        return
+    
+    # Store state for adding lesson
+    if 'temp_state' not in data:
+        data['temp_state'] = {}
+    data['temp_state'][user_id] = {'action': 'add_lesson', 'student_id': user_id}
+    save_data(data)
+    
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"➕ **Добавление занятия для {student['name']}**\n\n"
+        f"Отправьте дату и время в формате:\n"
+        f"`ДД.ММ ЧЧ:ММ`\n\n"
+        f"Например: `25.12 18:00`",
+        parse_mode="Markdown"
+    )
+    bot.register_next_step_handler(msg, lambda m: process_add_lesson_datetime(m, user_id))
+    bot.answer_callback_query(call.id)
+
+def process_add_lesson_datetime(message, user_id):
+    """Process datetime for adding lesson"""
+    try:
+        # Parse datetime in format DD.MM HH:MM
+        pattern = r'(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d{2})'
+        match = re.match(pattern, message.text.strip())
+        
+        if not match:
+            bot.send_message(message.chat.id, "❌ Неверный формат. Используйте ДД.ММ ЧЧ:ММ")
+            return
+        
+        day, month, hour, minute = map(int, match.groups())
+        current_year = datetime.now().year
+        
+        proposed_datetime = datetime(current_year, month, day, hour, minute)
+        
+        # Check if slot is available
+        if not is_slot_available(proposed_datetime):
+            bot.send_message(message.chat.id, "❌ Это время уже занято. Выберите другое.")
+            return
+        
+        # Create lesson
+        lesson_id = f"lesson_{user_id}_{int(proposed_datetime.timestamp())}"
+        student = data['users'][user_id]
+        
+        lesson = {
+            "id": lesson_id,
+            "student_id": user_id,
+            "student_name": student['name'],
+            "datetime": proposed_datetime.isoformat(),
+            "status": "booked"
+        }
+        
+        data['lessons'].append(lesson)
+        data['users'][user_id]['remaining'] -= 1
+        data['users'][user_id]['schedule'].append(lesson_id)
+        save_data(data)
+        
+        # Format confirmation
+        teacher_tz = pytz.timezone(TIMEZONE_TEACHER)
+        localized_time = teacher_tz.localize(proposed_datetime)
+        weekday_map = {0: "ПН", 1: "ВТ", 2: "СР", 3: "ЧТ", 4: "ПТ", 5: "СБ", 6: "ВС"}
+        weekday = weekday_map[localized_time.weekday()]
+        date_str = localized_time.strftime(f"%d.%m-{weekday}-%H:%M")
+        end_time = localized_time + timedelta(minutes=LESSON_DURATION)
+        
+        bot.send_message(
+            message.chat.id,
+            f"✅ **Занятие добавлено!**\n\n"
+            f"👨‍🎓 Студент: {student['name']}\n"
+            f"📅 Дата: {date_str}\n"
+            f"⏰ Время: {localized_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}\n"
+            f"🔗 Ссылка: {LESSON_LINK}\n"
+            f"📊 Осталось уроков у студента: {data['users'][user_id]['remaining']}",
+            parse_mode="Markdown"
+        )
+        
+        # Schedule reminder
+        schedule_reminder(lesson_id, proposed_datetime)
+        
+    except ValueError as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Произошла ошибка: {e}")
+
+# Change student name
+@bot.message_handler(func=lambda message: message.text == "✏️ Изменить имя студента" and is_teacher(message.from_user.id))
+def change_student_name(message):
+    """Change student's name in the system"""
+    students = [user for uid, user in data['users'].items() if uid != TEACHER_ID]
+    
+    if not students:
+        bot.send_message(message.chat.id, "📭 Нет зарегистрированных студентов.")
+        return
+    
+    markup = InlineKeyboardMarkup()
+    for user in students:
+        user_id = [uid for uid, u in data['users'].items() if u == user][0]
+        markup.add(InlineKeyboardButton(
+            f"{user['name']}",
+            callback_data=f"rename_select_{user_id}"
+        ))
+    
+    bot.send_message(
+        message.chat.id,
+        "✏️ **Изменение имени студента**\n\nВыберите студента:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rename_select_'))
+def select_student_for_rename(call):
+    """Select student and ask for new name"""
+    user_id = call.data.replace('rename_select_', '')
+    student = data['users'].get(user_id)
+    
+    if not student:
+        bot.answer_callback_query(call.id, "❌ Студент не найден")
+        return
+    
+    # Store state for renaming
+    if 'temp_state' not in data:
+        data['temp_state'] = {}
+    data['temp_state'][user_id] = {'action': 'rename', 'student_id': user_id}
+    save_data(data)
+    
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"✏️ **Изменение имени для {student['name']}**\n\n"
+        f"Отправьте новое имя студента:",
+        parse_mode="Markdown"
+    )
+    bot.register_next_step_handler(msg, lambda m: process_rename(m, user_id))
+    bot.answer_callback_query(call.id)
+
+def process_rename(message, user_id):
+    """Process new name for student"""
+    if not message.text.strip():
+        bot.send_message(message.chat.id, "❌ Имя не может быть пустым.")
+        return
+    
+    student = data['users'][user_id]
+    old_name = student['name']
+    student['name'] = message.text.strip()
+    save_data(data)
+    
+    # Update student name in all their lessons
+    for lesson in data['lessons']:
+        if lesson['student_id'] == user_id:
+            lesson['student_name'] = student['name']
+    save_data(data)
+    
+    bot.send_message(
+        message.chat.id,
+        f"✅ **Имя изменено!**\n\n"
+        f"Старое имя: {old_name}\n"
+        f"Новое имя: {student['name']}",
+        parse_mode="Markdown"
+    )
 
 print("🤖 Бот запущен...")
 bot.infinity_polling()
